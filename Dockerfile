@@ -13,4 +13,4 @@ ENV GATEWAY_DB_PATH=/data/gateway.db
 
 EXPOSE 8080
 
-CMD uvicorn gateway.app:app --host 0.0.0.0 --port ${PORT:-8080}
+CMD ["sh", "-c", "uvicorn gateway.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
