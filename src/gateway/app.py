@@ -490,7 +490,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _expire_stale_approval_requests(db)
         rows = db.execute(
             """
-            SELECT request_id, tool_name, arguments_hash, state, created_at, expires_at
+            SELECT request_id, tool_name, arguments_hash, arguments, tier, state, created_at, expires_at
             FROM approval_requests
             WHERE state = 'pending' AND expires_at > ?
             ORDER BY created_at ASC
