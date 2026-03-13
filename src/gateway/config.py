@@ -27,9 +27,11 @@ def get_settings() -> Settings:
         os.getenv("GATEWAY_DB_PATH", PROJECT_ROOT / "data" / "gateway.db")
     ).expanduser()
     jwt_secret = os.getenv("GATEWAY_JWT_SECRET", "change-me-in-production")
+    allowlist_path = Path(os.getenv("GATEWAY_ALLOWLIST_PATH", str(PROJECT_ROOT / "allowlist.yaml")))
     return Settings(
         db_path=db_path,
         jwt_secret=jwt_secret,
+        allowlist_path=allowlist_path,
         access_token_ttl_seconds=int(os.getenv("GATEWAY_ACCESS_TOKEN_TTL", "900")),
         refresh_token_ttl_days=int(os.getenv("GATEWAY_REFRESH_TOKEN_TTL_DAYS", "90")),
         approval_timeout_seconds=int(os.getenv("GATEWAY_APPROVAL_TIMEOUT", "60")),

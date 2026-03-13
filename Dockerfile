@@ -13,6 +13,7 @@ COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 ENV GATEWAY_DB_PATH=/data/gateway.db
+ENV GATEWAY_ALLOWLIST_PATH=/app/allowlist.yaml
 
 EXPOSE 8080
 
