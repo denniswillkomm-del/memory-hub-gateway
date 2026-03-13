@@ -70,6 +70,14 @@
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["memory_id"], "properties": { "memory_id": { "type": "string" } } } } } },
         "responses": { "200": { "description": "Archived", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
       }
+    },
+    "/api/v1/tools/create-work-item": {
+      "post": {
+        "operationId": "createWorkItem",
+        "summary": "Create a new work item (requires approval on Mac)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" }, "description": { "type": "string" }, "project": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Created", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
     }
   }
 }

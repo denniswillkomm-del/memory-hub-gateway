@@ -162,6 +162,11 @@ class UpdateMemoryBody(BaseModel):
 class ArchiveMemoryBody(BaseModel):
     memory_id: str
 
+class CreateWorkItemBody(BaseModel):
+    title: str
+    description: Optional[str] = None
+    project: Optional[str] = None
+
 
 @router.post("/api/v1/tools/search-memories")
 async def tool_search_memories(body: SearchMemoriesBody, request: Request) -> dict[str, Any]:
@@ -205,6 +210,15 @@ async def tool_update_memory(body: UpdateMemoryBody, request: Request) -> dict[s
 @router.post("/api/v1/tools/archive-memory")
 async def tool_archive_memory(body: ArchiveMemoryBody, request: Request) -> dict[str, Any]:
     return await _queue_tool_and_poll(request, "archive_memory", {"memory_id": body.memory_id}, tier=2)
+
+@router.post("/api/v1/tools/create-work-item")
+async def tool_create_work_item(body: CreateWorkItemBody, request: Request) -> dict[str, Any]:
+    args: dict[str, Any] = {"title": body.title}
+    if body.description:
+        args["description"] = body.description
+    if body.project:
+        args["project"] = body.project
+    return await _queue_tool_and_poll(request, "create_work_item", args, tier=2)
 
 
 @router.post("/api/v1/tool-call")
