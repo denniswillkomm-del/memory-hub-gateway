@@ -14,6 +14,7 @@ RUN chmod +x entrypoint.sh
 
 ENV GATEWAY_DB_PATH=/data/gateway.db
 ENV GATEWAY_ALLOWLIST_PATH=/app/allowlist.yaml
+ENV GATEWAY_MIGRATIONS_DIR=/app/migrations
 
 EXPOSE 8080
 

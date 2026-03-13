@@ -18,7 +18,8 @@ from gateway.db import get_connection, run_migrations
 from gateway.direct_call import DirectCallError, MemoryHubDirectClient
 from gateway.state_machine import router as state_machine_router
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+import os as _os
+MIGRATIONS_DIR = Path(_os.getenv("GATEWAY_MIGRATIONS_DIR", str(Path(__file__).resolve().parents[2] / "migrations")))
 
 
 def _utc_now() -> datetime:
