@@ -1,0 +1,75 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Memory Hub Gateway",
+    "description": "Access your personal memory hub.",
+    "version": "2.0.0"
+  },
+  "servers": [{ "url": "https://web-production-6a48a.up.railway.app" }],
+  "paths": {
+    "/api/v1/tools/search-memories": {
+      "post": {
+        "operationId": "searchMemories",
+        "summary": "Search memories by query string",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["query"], "properties": { "query": { "type": "string" }, "limit": { "type": "integer", "default": 10 } } } } } },
+        "responses": { "200": { "description": "Results", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/get-memory": {
+      "post": {
+        "operationId": "getMemory",
+        "summary": "Get full content of a memory by ID",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["memory_id"], "properties": { "memory_id": { "type": "string", "description": "e.g. mem_abc123" } } } } } },
+        "responses": { "200": { "description": "Memory", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/list-recent-memories": {
+      "post": {
+        "operationId": "listRecentMemories",
+        "summary": "List recently updated memories",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "limit": { "type": "integer", "default": 20 }, "project": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Memories", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/get-project-context": {
+      "post": {
+        "operationId": "getProjectContext",
+        "summary": "Get aggregated context for a project",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["project"], "properties": { "project": { "type": "string", "description": "e.g. gateway, scotapp" } } } } } },
+        "responses": { "200": { "description": "Context", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/list-work-items": {
+      "post": {
+        "operationId": "listWorkItems",
+        "summary": "List work items optionally filtered by status",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "status": { "type": "string", "enum": ["open", "in_progress", "done"] } } } } } },
+        "responses": { "200": { "description": "Work items", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/create-memory": {
+      "post": {
+        "operationId": "createMemory",
+        "summary": "Create a new memory (requires approval on Mac)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["title", "content", "type"], "properties": { "title": { "type": "string" }, "content": { "type": "string" }, "type": { "type": "string", "enum": ["decision", "project_context", "reference", "snippet"] }, "summary": { "type": "string" }, "project": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Created", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/update-memory": {
+      "post": {
+        "operationId": "updateMemory",
+        "summary": "Update a memory (requires approval)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["memory_id", "content"], "properties": { "memory_id": { "type": "string" }, "content": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Updated", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    },
+    "/api/v1/tools/archive-memory": {
+      "post": {
+        "operationId": "archiveMemory",
+        "summary": "Archive a memory (requires approval)",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["memory_id"], "properties": { "memory_id": { "type": "string" } } } } } },
+        "responses": { "200": { "description": "Archived", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object", "additionalProperties": true } } } } } } }
+      }
+    }
+  }
+}
