@@ -9,8 +9,11 @@ COPY allowlist.yaml ./
 
 RUN pip install --no-cache-dir . && mkdir -p /data
 
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
+
 ENV GATEWAY_DB_PATH=/data/gateway.db
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn gateway.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+CMD ["./entrypoint.sh"]
