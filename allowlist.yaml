@@ -1,0 +1,32 @@
+version: 1
+tiers:
+  auto_approved:
+    - search_memories
+    - get_memory
+    - list_recent_memories
+    - get_project_context
+    - list_work_items
+    - get_agent_context
+    - list_memory_entities
+    - list_memory_artifacts
+    - get_link_candidate
+    - get_review_queue
+    - list_handoffs
+    - list_link_candidates
+
+  approval_gated:
+    - create_memory
+    - update_memory
+    - archive_memory
+    - create_work_item
+    - claim_work_item
+    - complete_work_item
+    - create_handoff
+    - link_memories
+    - create_link_candidate
+    - approve_link_candidate
+    - reject_link_candidate
+    - mark_handoff_read
+    - start_work_item_session
+    - start_project_session
+    - start_agent_session
