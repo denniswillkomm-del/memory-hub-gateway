@@ -7,7 +7,7 @@ COPY src/ ./src/
 COPY migrations/ ./migrations/
 COPY allowlist.yaml ./
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . && mkdir -p /data
 
 ENV GATEWAY_DB_PATH=/data/gateway.db
 
