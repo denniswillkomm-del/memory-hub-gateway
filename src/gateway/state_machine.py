@@ -55,6 +55,158 @@ def _companion_online(request: Request) -> bool:
     timeout_seconds = request.app.state.settings.companion_heartbeat_timeout_seconds
     return (_utc_now() - last_seen).total_seconds() < timeout_seconds
 
+async def _queue_tool_and_poll(
+    request: Request,
+    tool_name: str,
+    arguments: dict[str, Any],
+    tier: int,
+) -> dict[str, Any]:
+    """Queue a tool call and long-poll until the companion executes it."""
+    db = request.app.state.db
+    settings = request.app.state.settings
+
+    if not _companion_online(request):
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "companion_unavailable", "retry_after": settings.companion_heartbeat_timeout_seconds},
+        )
+
+    args_str = json.dumps(arguments, sort_keys=True)
+    arguments_hash = hashlib.sha256(args_str.encode()).hexdigest()
+    request_id = str(uuid.uuid4())
+    idempotency_key = str(uuid.uuid4())
+    now = _utc_now()
+    expires_at = now + timedelta(seconds=settings.approval_timeout_seconds)
+    result_expires_at_dt = now + timedelta(seconds=settings.result_ttl_seconds)
+
+    def _create() -> None:
+        db.execute(
+            """
+            INSERT INTO approval_requests
+                (request_id, idempotency_key, tool_name, arguments_hash, arguments, tier, state, created_at, expires_at, result_expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+            """,
+            (request_id, idempotency_key, tool_name, arguments_hash, args_str, tier,
+             _isoformat(now), _isoformat(expires_at), _isoformat(result_expires_at_dt)),
+        )
+        db.commit()
+
+    await run_in_threadpool(_create)
+
+    timeout_dt = expires_at
+    while True:
+        await asyncio.sleep(0.5)
+        current_now = _utc_now()
+
+        def _check() -> Any:
+            return db.execute(
+                "SELECT state, result, error FROM approval_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+
+        row = await run_in_threadpool(_check)
+        if row is None:
+            raise HTTPException(status_code=500, detail="request_deleted")
+
+        state = row["state"]
+        if state == "executed":
+            return {"result": json.loads(row["result"]) if row["result"] else None}
+        if state == "denied":
+            raise HTTPException(status_code=403, detail={"error": "approval_denied"})
+        if state == "failed":
+            raise HTTPException(status_code=500, detail={"error": json.loads(row["error"]) if row["error"] else "unknown_error"})
+        if state == "expired":
+            raise HTTPException(status_code=408, detail={"error": "approval_timeout"})
+
+        if current_now >= timeout_dt:
+            def _expire() -> None:
+                db.execute(
+                    "UPDATE approval_requests SET state = 'expired' WHERE request_id = ? AND state IN ('pending', 'approved')",
+                    (request_id,),
+                )
+                db.commit()
+            await run_in_threadpool(_expire)
+            raise HTTPException(status_code=408, detail={"error": "approval_timeout"})
+
+
+# ── Dedicated tool endpoints (explicit schemas for ChatGPT) ───────────────────
+
+class SearchMemoriesBody(BaseModel):
+    query: str
+    limit: int = 10
+
+class GetMemoryBody(BaseModel):
+    memory_id: str
+
+class ListRecentMemoriesBody(BaseModel):
+    limit: int = 20
+    project: Optional[str] = None
+
+class GetProjectContextBody(BaseModel):
+    project: str
+
+class ListWorkItemsBody(BaseModel):
+    status: Optional[str] = None
+
+class CreateMemoryBody(BaseModel):
+    title: str
+    content: str
+    type: str
+    project: Optional[str] = None
+    summary: Optional[str] = None
+
+class UpdateMemoryBody(BaseModel):
+    memory_id: str
+    content: str
+
+class ArchiveMemoryBody(BaseModel):
+    memory_id: str
+
+
+@router.post("/api/v1/tools/search-memories")
+async def tool_search_memories(body: SearchMemoriesBody, request: Request) -> dict[str, Any]:
+    return await _queue_tool_and_poll(request, "search_memories", {"query": body.query, "limit": body.limit}, tier=1)
+
+@router.post("/api/v1/tools/get-memory")
+async def tool_get_memory(body: GetMemoryBody, request: Request) -> dict[str, Any]:
+    return await _queue_tool_and_poll(request, "get_memory", {"memory_id": body.memory_id}, tier=1)
+
+@router.post("/api/v1/tools/list-recent-memories")
+async def tool_list_recent_memories(body: ListRecentMemoriesBody, request: Request) -> dict[str, Any]:
+    args: dict[str, Any] = {"limit": body.limit}
+    if body.project:
+        args["project"] = body.project
+    return await _queue_tool_and_poll(request, "list_recent_memories", args, tier=1)
+
+@router.post("/api/v1/tools/get-project-context")
+async def tool_get_project_context(body: GetProjectContextBody, request: Request) -> dict[str, Any]:
+    return await _queue_tool_and_poll(request, "get_project_context", {"project": body.project}, tier=1)
+
+@router.post("/api/v1/tools/list-work-items")
+async def tool_list_work_items(body: ListWorkItemsBody, request: Request) -> dict[str, Any]:
+    args: dict[str, Any] = {}
+    if body.status:
+        args["status"] = body.status
+    return await _queue_tool_and_poll(request, "list_work_items", args, tier=1)
+
+@router.post("/api/v1/tools/create-memory")
+async def tool_create_memory(body: CreateMemoryBody, request: Request) -> dict[str, Any]:
+    args: dict[str, Any] = {"title": body.title, "content": body.content, "type": body.type}
+    if body.project:
+        args["project"] = body.project
+    if body.summary:
+        args["summary"] = body.summary
+    return await _queue_tool_and_poll(request, "create_memory", args, tier=2)
+
+@router.post("/api/v1/tools/update-memory")
+async def tool_update_memory(body: UpdateMemoryBody, request: Request) -> dict[str, Any]:
+    return await _queue_tool_and_poll(request, "update_memory", {"memory_id": body.memory_id, "content": body.content}, tier=2)
+
+@router.post("/api/v1/tools/archive-memory")
+async def tool_archive_memory(body: ArchiveMemoryBody, request: Request) -> dict[str, Any]:
+    return await _queue_tool_and_poll(request, "archive_memory", {"memory_id": body.memory_id}, tier=2)
+
+
 @router.post("/api/v1/tool-call")
 async def handle_tool_call(
     request: Request,

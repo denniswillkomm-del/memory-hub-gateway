@@ -1,33 +1,32 @@
 openapi: "3.0.3"
 info:
   title: Memory Hub Gateway
-  description: Access your personal memory hub.
-  version: "1.0.0"
+  description: Access your personal memory hub — search, read, and write memories and work items.
+  version: "2.0.0"
 servers:
   - url: https://web-production-6a48a.up.railway.app
 paths:
-  /api/v1/direct-call:
+  /api/v1/tools/search-memories:
     post:
-      operationId: callMemoryHubTool
-      summary: Call a memory hub tool by name with arguments
+      operationId: searchMemories
+      summary: Search memories by query string
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required:
-                - tool_name
+              required: [query]
               properties:
-                tool_name:
+                query:
                   type: string
-                  description: "Tool name, e.g. search_memories, list_recent_memories, list_work_items, create_memory"
-                arguments:
-                  type: object
-                  description: Arguments for the tool
+                  description: Full-text search query
+                limit:
+                  type: integer
+                  default: 10
       responses:
         "200":
-          description: Tool result
+          description: Search results
           content:
             application/json:
               schema:
@@ -35,7 +34,206 @@ paths:
                 properties:
                   result:
                     type: object
-        "403":
-          description: Tool not in allowlist
-        "502":
-          description: Memory hub call failed
+                    additionalProperties: true
+
+  /api/v1/tools/get-memory:
+    post:
+      operationId: getMemory
+      summary: Get full content of a specific memory by ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [memory_id]
+              properties:
+                memory_id:
+                  type: string
+                  description: The memory ID (e.g. mem_abc123)
+      responses:
+        "200":
+          description: Memory content
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/list-recent-memories:
+    post:
+      operationId: listRecentMemories
+      summary: List recently updated memories
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: integer
+                  default: 20
+                project:
+                  type: string
+                  description: Optional project filter
+      responses:
+        "200":
+          description: Recent memories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/get-project-context:
+    post:
+      operationId: getProjectContext
+      summary: Get aggregated context for a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project]
+              properties:
+                project:
+                  type: string
+                  description: Project name (e.g. gateway, scotapp)
+      responses:
+        "200":
+          description: Project context
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/list-work-items:
+    post:
+      operationId: listWorkItems
+      summary: List work items, optionally filtered by status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [open, in_progress, done]
+                  description: Filter by status (omit for all)
+      responses:
+        "200":
+          description: Work items
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/create-memory:
+    post:
+      operationId: createMemory
+      summary: Create a new memory (requires approval on your Mac)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, content, type]
+              properties:
+                title:
+                  type: string
+                content:
+                  type: string
+                  description: Full memory content in markdown
+                type:
+                  type: string
+                  enum: [decision, project_context, reference, snippet]
+                summary:
+                  type: string
+                  description: One-line summary
+                project:
+                  type: string
+                  description: Project this memory belongs to
+      responses:
+        "200":
+          description: Created memory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/update-memory:
+    post:
+      operationId: updateMemory
+      summary: Update the content of an existing memory (requires approval)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [memory_id, content]
+              properties:
+                memory_id:
+                  type: string
+                content:
+                  type: string
+      responses:
+        "200":
+          description: Updated memory
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
+
+  /api/v1/tools/archive-memory:
+    post:
+      operationId: archiveMemory
+      summary: Archive a memory (requires approval)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [memory_id]
+              properties:
+                memory_id:
+                  type: string
+      responses:
+        "200":
+          description: Archived
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: true
