@@ -1,9 +1,35 @@
 import threading
 import time
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
 
+
+def _pair_and_auth(client: TestClient) -> str:
+    device_id = str(uuid.uuid4())
+    start = client.post("/api/v1/companion/pair/start", json={"device_id": device_id})
+    request_id = start.json()["request_id"]
+    client.post(
+        f"/approve/device/{request_id}/action",
+        data={"action": "approve"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    refresh_token = client.get(f"/api/v1/companion/pair/poll/{request_id}").json()["refresh_token"]
+    access_token = client.post(
+        "/api/v1/companion/token/refresh",
+        json={"device_id": device_id, "refresh_token": refresh_token},
+    ).json()["access_token"]
+    heartbeat = client.post(
+        "/api/v1/companion/heartbeat",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert heartbeat.status_code == 200
+    return access_token
+
+
 def test_state_machine_happy_path(client: TestClient):
+    access_token = _pair_and_auth(client)
     result_container = {}
     
     def make_call():
@@ -24,7 +50,11 @@ def test_state_machine_happy_path(client: TestClient):
     r_approve = client.post(f"/api/v1/approval-requests/{req_id}/approve")
     assert r_approve.status_code == 200
     
-    r_confirm = client.post(f"/api/v1/approval-requests/{req_id}/confirm", json={"state": "executed", "result": {"success": True}})
+    r_confirm = client.post(
+        f"/api/v1/approval-requests/{req_id}/confirm",
+        json={"state": "executed", "result": {"success": True}},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
     assert r_confirm.status_code == 200
     
     t.join(timeout=2.0)
@@ -43,6 +73,7 @@ def test_state_machine_happy_path(client: TestClient):
     assert res3.status_code == 409
 
 def test_state_machine_timeout(client: TestClient):
+    _pair_and_auth(client)
     # override timeout
     client.app.state.settings.approval_timeout_seconds = 1
     

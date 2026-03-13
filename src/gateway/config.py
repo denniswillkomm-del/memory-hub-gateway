@@ -18,6 +18,7 @@ class Settings:
     result_ttl_seconds: int = 600                # 10 min
     companion_heartbeat_timeout_seconds: int = 30
     companion_approval_port: int = 47821
+    memory_hub_path: str = "memory-hub"
     allowlist_path: Path = field(default_factory=lambda: PROJECT_ROOT / "allowlist.yaml")
 
 
@@ -34,4 +35,5 @@ def get_settings() -> Settings:
         approval_timeout_seconds=int(os.getenv("GATEWAY_APPROVAL_TIMEOUT", "60")),
         result_ttl_seconds=int(os.getenv("GATEWAY_RESULT_TTL", "600")),
         companion_heartbeat_timeout_seconds=int(os.getenv("GATEWAY_HEARTBEAT_TIMEOUT", "30")),
+        memory_hub_path=os.getenv("GATEWAY_MEMORY_HUB_PATH", "memory-hub"),
     )

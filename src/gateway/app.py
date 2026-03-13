@@ -12,10 +12,11 @@ import jwt
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from gateway.state_machine import router as state_machine_router
 from gateway.allowlist import AllowlistConfig, allowlist_middleware_dispatch
 from gateway.config import Settings, get_settings
 from gateway.db import get_connection, run_migrations
+from gateway.direct_call import DirectCallError, MemoryHubDirectClient
+from gateway.state_machine import router as state_machine_router
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
@@ -175,6 +176,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         age = (datetime.now(UTC) - last_dt).total_seconds()
         online = age < s.companion_heartbeat_timeout_seconds
         return {"companion_online": online, "last_seen": last_seen}
+
+    @app.post("/api/v1/direct-call")
+    def direct_call(request: Request, body: dict[str, Any]) -> dict[str, object]:
+        tool_name = body.get("tool_name")
+        if not tool_name:
+            raise HTTPException(status_code=400, detail="tool_name_required")
+
+        tier = request.app.state.allowlist.get_tier(tool_name)
+        if tier != 1:
+            raise HTTPException(status_code=403, detail={"error": "tool_not_exposed", "tool": tool_name})
+
+        try:
+            return MemoryHubDirectClient(request.app.state.settings).call_tool(
+                tool_name,
+                body.get("arguments", {}),
+            )
+        except DirectCallError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "memory_hub_call_failed", "detail": str(exc)},
+            ) from exc
 
     @app.post("/api/v1/companion/pair/start")
     def start_pairing(request: Request, body: dict[str, str]) -> dict[str, object]:
@@ -349,7 +371,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         new_refresh_expires_at = now + timedelta(days=s.refresh_token_ttl_days)
         db.execute(
             "UPDATE devices SET hashed_refresh_token = ?, last_seen = ?, refresh_token_expires_at = ? WHERE device_id = ?",
-            (_isoformat(now), _isoformat(new_refresh_expires_at), new_hashed, device_id),
+            (new_hashed, _isoformat(now), _isoformat(new_refresh_expires_at), device_id),
         )
         db.commit()
 
@@ -364,44 +386,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ── Companion helpers (auth-gated) ────────────────────────────────────────
 
-    @app.get("/api/v1/companion/pending-requests")
-    def list_pending_requests(request: Request) -> dict[str, object]:
-        """Companion polls this to get pending approval requests."""
-        _verify_access_token(request)
+    @app.post("/api/v1/companion/heartbeat")
+    def companion_heartbeat(request: Request) -> dict[str, object]:
+        device_id = _verify_access_token(request)
         db = request.app.state.db
+        now = _utc_now()
+
+        device = db.execute(
+            "SELECT revoked FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if device is None:
+            raise HTTPException(status_code=401, detail="unknown_device")
+        if device["revoked"]:
+            raise HTTPException(status_code=401, detail="device_revoked")
+
+        db.execute(
+            """
+            INSERT INTO companion_heartbeats (device_id, last_heartbeat_at)
+            VALUES (?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET last_heartbeat_at = excluded.last_heartbeat_at
+            """,
+            (device_id, _isoformat(now)),
+        )
+        db.execute(
+            "UPDATE devices SET last_seen = ? WHERE device_id = ?",
+            (_isoformat(now), device_id),
+        )
         _expire_stale_approval_requests(db)
         rows = db.execute(
             """
             SELECT request_id, tool_name, arguments_hash, state, created_at, expires_at
             FROM approval_requests
-            WHERE state = 'pending'
+            WHERE state = 'pending' AND expires_at > ?
             ORDER BY created_at ASC
             """,
+            (_isoformat(now),),
         ).fetchall()
-        return {"pending": [dict(r) for r in rows]}
-
-    @app.get("/api/v1/tool-call/{request_id}")
-    def poll_tool_call(request: Request, request_id: str) -> dict[str, object]:
-        """Async polling alternative: check the status of a tool call by request_id."""
-        import json as _json
-        db = request.app.state.db
-        _expire_stale_approval_requests(db)
-        row = db.execute(
-            "SELECT request_id, state, result, error FROM approval_requests WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="approval_request_not_found")
-        state = row["state"]
-        if state == "denied":
-            raise HTTPException(status_code=403, detail={"error": "approval_denied", "request_id": request_id})
-        if state == "expired":
-            raise HTTPException(status_code=408, detail={"error": "approval_timeout", "request_id": request_id})
+        db.commit()
         return {
-            "request_id": request_id,
-            "state": state,
-            "result": _json.loads(row["result"]) if row["result"] else None,
-            "error": row["error"],
+            "ok": True,
+            "device_id": device_id,
+            "last_seen": _isoformat(now),
+            "pending": [dict(r) for r in rows],
         }
 
+
     return app
+
+
+# Module-level app instance for uvicorn / Railway
+app = create_app()

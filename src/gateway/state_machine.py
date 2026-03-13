@@ -1,11 +1,12 @@
 import asyncio
 import hashlib
 import json
-import uuid
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Optional
 
+import jwt
 from fastapi import APIRouter, Header, Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -28,6 +29,32 @@ class ConfirmRequest(BaseModel):
     result: Optional[Any] = None
     error: Optional[Any] = None
 
+
+def _verify_access_token(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="bearer_token_required")
+    token = auth.removeprefix("Bearer ")
+    secret: str = request.app.state.settings.jwt_secret
+    try:
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError as exc:
+        raise HTTPException(status_code=401, detail="access_token_expired") from exc
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail="invalid_access_token") from exc
+    return payload["device_id"]
+
+
+def _companion_online(request: Request) -> bool:
+    row = request.app.state.db.execute(
+        "SELECT last_heartbeat_at FROM companion_heartbeats ORDER BY last_heartbeat_at DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return False
+    last_seen = _parse_timestamp(row["last_heartbeat_at"])
+    timeout_seconds = request.app.state.settings.companion_heartbeat_timeout_seconds
+    return (_utc_now() - last_seen).total_seconds() < timeout_seconds
+
 @router.post("/api/v1/tool-call")
 async def handle_tool_call(
     request: Request,
@@ -41,6 +68,12 @@ async def handle_tool_call(
     tool_name = body.get("tool_name")
     if not tool_name:
         return JSONResponse(status_code=400, content={"error": "tool_name_required"})
+    if not _companion_online(request):
+        retry_after = request.app.state.settings.companion_heartbeat_timeout_seconds
+        return JSONResponse(
+            status_code=503,
+            content={"error": "local_companion_unavailable", "retry_after": retry_after},
+        )
     
     args_str = json.dumps(body.get("arguments", {}), sort_keys=True)
     arguments_hash = hashlib.sha256(args_str.encode("utf-8")).hexdigest()
@@ -135,6 +168,44 @@ async def handle_tool_call(
             if final_state == "expired":
                 return JSONResponse(status_code=408, content={"error": "approval_timeout", "request_id": request_id})
 
+@router.get("/api/v1/companion/pending-requests")
+async def get_pending_requests(request: Request):
+    _verify_access_token(request)
+    db = request.app.state.db
+
+    def fetch():
+        now = _isoformat(_utc_now())
+        rows = db.execute(
+            """
+            SELECT request_id, tool_name, arguments_hash, state, created_at, expires_at
+            FROM approval_requests
+            WHERE state = 'pending' AND expires_at > ?
+            ORDER BY created_at ASC
+            """,
+            (now,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    pending = await run_in_threadpool(fetch)
+    return {"pending": pending}
+
+
+@router.get("/api/v1/tool-call/{request_id}")
+async def get_tool_call_status(request_id: str, request: Request):
+    db = request.app.state.db
+
+    def fetch():
+        return db.execute(
+            "SELECT request_id, tool_name, state, result, error, created_at, expires_at FROM approval_requests WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+
+    row = await run_in_threadpool(fetch)
+    if row is None:
+        raise HTTPException(status_code=404, detail="request_not_found")
+    return dict(row)
+
+
 @router.post("/api/v1/approval-requests/{request_id}/approve")
 async def approve_request(request_id: str, request: Request):
     db = request.app.state.db
@@ -167,6 +238,7 @@ async def deny_request(request_id: str, request: Request):
 
 @router.post("/api/v1/approval-requests/{request_id}/confirm")
 async def confirm_approval_request(request_id: str, body: ConfirmRequest, request: Request):
+    _verify_access_token(request)
     db = request.app.state.db
     
     if body.state not in ("executed", "failed"):

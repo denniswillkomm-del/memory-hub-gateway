@@ -318,15 +318,30 @@ Companion ──► POST .../deny ──► state = denied ──► 403 an Chat
 
 ---
 
-## Offene Punkte (noch nicht implementiert)
+## Implementierungsstatus
 
-| Was | Work Item |
+| Komponente | Status |
 |---|---|
-| Companion-Heartbeat + 503 bei Offline | `wrk_beccab` (offen) |
-| `/api/v1/direct-call` für TIER 1 Tools | kein Work Item |
-| Linux `libsecret` / Windows DPAPI Keychain | kein Work Item |
-| Gateway OAuth-Login + Device-Liste in UI | kein Work Item |
-| Request-Queue im Companion (offline resilience) | kein Work Item |
+| Gateway Scaffold + Migrations | ✅ |
+| Device Pairing (pair/start, poll, revoke) | ✅ |
+| Token Refresh mit Rotation | ✅ |
+| Allowlist Middleware (TIER 1/2/3) | ✅ |
+| Approval State Machine (long-poll, Idempotenz, TTL) | ✅ |
+| Companion Health / Heartbeat / 503 bei Offline | ✅ |
+| `POST /api/v1/direct-call` für TIER 1 Tools | ✅ |
+| `GET /api/v1/companion/pending-requests` | ✅ |
+| Companion Event Loop (polling + Approval-UI) | ✅ |
+| Companion Tool Executor (MCP stdio subprocess) | ✅ |
+| Companion Background Token Refresh | ✅ |
+
+## Noch offen
+
+| Was | Priorität |
+|---|---|
+| Gateway auf öffentlichem Server deployen (Railway, Fly.io o.ä.) | Blocker für ChatGPT |
+| ChatGPT Action konfigurieren (OpenAPI-Schema-URL) | Last step |
+| Linux `libsecret` / Windows DPAPI Keychain | Nice-to-have |
+| `reopen_work_item` MCP-Tool in memory-hub | Koordinationsverbesserung |
 
 ---
 

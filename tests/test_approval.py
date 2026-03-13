@@ -29,12 +29,18 @@ def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _heartbeat(client: TestClient, access_token: str) -> None:
+    response = client.post("/api/v1/companion/heartbeat", headers=_auth(access_token))
+    assert response.status_code == 200
+
+
 def _call_tool_and_approve(client: TestClient, access_token: str, tool_name: str, arguments: dict) -> dict:
     """
     Full companion flow: starts tool call in background thread, approves + executes via
     companion endpoints, then joins the thread and returns the gateway's final response.
     """
     headers = _auth(access_token)
+    _heartbeat(client, access_token)
     result_container: dict = {}
 
     def make_tool_call() -> None:
@@ -63,6 +69,7 @@ def _call_tool_and_approve(client: TestClient, access_token: str, tool_name: str
     r_confirm = client.post(
         f"/api/v1/approval-requests/{request_id}/confirm",
         json={"state": "executed", "result": {"memory_id": "mem_abc"}},
+        headers=headers,
     )
     assert r_confirm.status_code == 200
 
@@ -84,6 +91,7 @@ def test_tool_call_auto_approved_tier1_rejected_at_tool_call_endpoint(client: Te
 
 def test_same_idempotency_key_different_payload_returns_409(client: TestClient) -> None:
     _, access_token = _get_access_token(client)
+    _heartbeat(client, access_token)
     idem_key = str(uuid.uuid4())
 
     # First call starts the long-poll in a thread
@@ -132,6 +140,7 @@ def test_companion_confirm_full_lifecycle(client: TestClient) -> None:
 
 def test_companion_deny_returns_403_to_client(client: TestClient) -> None:
     _, access_token = _get_access_token(client)
+    _heartbeat(client, access_token)
     result_container: dict = {}
 
     def make_call() -> None:
@@ -158,6 +167,7 @@ def test_companion_deny_returns_403_to_client(client: TestClient) -> None:
 
 def test_invalid_state_transition_returns_409(client: TestClient) -> None:
     _, access_token = _get_access_token(client)
+    _heartbeat(client, access_token)
 
     # Start and immediately try to confirm (skipping approve) — should fail
     result_container: dict = {}
@@ -182,6 +192,7 @@ def test_invalid_state_transition_returns_409(client: TestClient) -> None:
     r = client.post(
         f"/api/v1/approval-requests/{request_id}/confirm",
         json={"state": "executed"},
+        headers=_auth(access_token),
     )
     assert r.status_code == 409
 
@@ -197,6 +208,7 @@ def test_unauthenticated_companion_endpoint_returns_401(client: TestClient) -> N
 
 def test_poll_endpoint_returns_state(client: TestClient) -> None:
     _, access_token = _get_access_token(client)
+    _heartbeat(client, access_token)
 
     result_container: dict = {}
 
