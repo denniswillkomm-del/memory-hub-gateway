@@ -154,6 +154,7 @@ class CreateMemoryBody(BaseModel):
     type: str
     project: Optional[str] = None
     summary: Optional[str] = None
+    agent_name: str = "chatgpt"
 
 class UpdateMemoryBody(BaseModel):
     memory_id: str
@@ -196,7 +197,7 @@ async def tool_list_work_items(body: ListWorkItemsBody, request: Request) -> dic
 
 @router.post("/api/v1/tools/create-memory")
 async def tool_create_memory(body: CreateMemoryBody, request: Request) -> dict[str, Any]:
-    args: dict[str, Any] = {"title": body.title, "content": body.content, "type": body.type}
+    args: dict[str, Any] = {"title": body.title, "content": body.content, "type": body.type, "agent_name": body.agent_name}
     if body.project:
         args["project"] = body.project
     if body.summary:
