@@ -1,0 +1,41 @@
+openapi: "3.0.3"
+info:
+  title: Memory Hub Gateway
+  description: Access your personal memory hub.
+  version: "1.0.0"
+servers:
+  - url: https://web-production-6a48a.up.railway.app
+paths:
+  /api/v1/direct-call:
+    post:
+      operationId: callMemoryHubTool
+      summary: Call a memory hub tool by name with arguments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tool_name
+              properties:
+                tool_name:
+                  type: string
+                  description: "Tool name, e.g. search_memories, list_recent_memories, list_work_items, create_memory"
+                arguments:
+                  type: object
+                  description: Arguments for the tool
+      responses:
+        "200":
+          description: Tool result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: object
+        "403":
+          description: Tool not in allowlist
+        "502":
+          description: Memory hub call failed

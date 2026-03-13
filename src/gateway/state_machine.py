@@ -122,10 +122,10 @@ async def handle_tool_call(
             result_expires_at = now + timedelta(seconds=settings.result_ttl_seconds)
             db.execute(
                 """
-                INSERT INTO approval_requests (request_id, idempotency_key, tool_name, arguments_hash, state, created_at, expires_at, result_expires_at)
-                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+                INSERT INTO approval_requests (request_id, idempotency_key, tool_name, arguments_hash, arguments, tier, state, created_at, expires_at, result_expires_at)
+                VALUES (?, ?, ?, ?, ?, 2, 'pending', ?, ?, ?)
                 """,
-                (request_id, idempotency_key, tool_name, arguments_hash, _isoformat(now), _isoformat(expires_at), _isoformat(result_expires_at))
+                (request_id, idempotency_key, tool_name, arguments_hash, args_str, _isoformat(now), _isoformat(expires_at), _isoformat(result_expires_at))
             )
             db.commit()
             return expires_at
@@ -177,7 +177,7 @@ async def get_pending_requests(request: Request):
         now = _isoformat(_utc_now())
         rows = db.execute(
             """
-            SELECT request_id, tool_name, arguments_hash, state, created_at, expires_at
+            SELECT request_id, tool_name, arguments_hash, arguments, tier, state, created_at, expires_at
             FROM approval_requests
             WHERE state = 'pending' AND expires_at > ?
             ORDER BY created_at ASC
@@ -196,7 +196,7 @@ async def get_tool_call_status(request_id: str, request: Request):
 
     def fetch():
         return db.execute(
-            "SELECT request_id, tool_name, state, result, error, created_at, expires_at FROM approval_requests WHERE request_id = ?",
+            "SELECT request_id, tool_name, arguments, tier, state, result, error, created_at, expires_at FROM approval_requests WHERE request_id = ?",
             (request_id,),
         ).fetchone()
 
@@ -250,7 +250,7 @@ async def confirm_approval_request(request_id: str, body: ConfirmRequest, reques
             return "not_found"
             
         current_state = row["state"]
-        if current_state != "approved":
+        if current_state not in ("approved", "pending"):
             return "conflict"
             
         res_str = json.dumps(body.result) if body.result is not None else None

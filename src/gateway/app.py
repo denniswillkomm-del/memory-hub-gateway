@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import json as _json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -11,11 +13,11 @@ from typing import Annotated, Any, AsyncIterator
 import jwt
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from starlette.concurrency import run_in_threadpool
 
 from gateway.allowlist import AllowlistConfig, allowlist_middleware_dispatch
 from gateway.config import Settings, get_settings
 from gateway.db import get_connection, run_migrations
-from gateway.direct_call import DirectCallError, MemoryHubDirectClient
 from gateway.state_machine import router as state_machine_router
 
 import os as _os
@@ -179,25 +181,96 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"companion_online": online, "last_seen": last_seen}
 
     @app.post("/api/v1/direct-call")
-    def direct_call(request: Request, body: dict[str, Any]) -> dict[str, object]:
+    async def direct_call(request: Request, body: dict[str, Any]) -> dict[str, object]:
         tool_name = body.get("tool_name")
         if not tool_name:
             raise HTTPException(status_code=400, detail="tool_name_required")
 
-        tier = request.app.state.allowlist.get_tier(tool_name)
-        if tier != 1:
+        allowlist: AllowlistConfig = request.app.state.allowlist
+        tier = allowlist.get_tier(tool_name)
+        if tier is None:
             raise HTTPException(status_code=403, detail={"error": "tool_not_exposed", "tool": tool_name})
 
-        try:
-            return MemoryHubDirectClient(request.app.state.settings).call_tool(
-                tool_name,
-                body.get("arguments", {}),
+        db = request.app.state.db
+        settings: Settings = request.app.state.settings
+
+        def _check_companion() -> bool:
+            row = db.execute(
+                "SELECT last_heartbeat_at FROM companion_heartbeats ORDER BY last_heartbeat_at DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return False
+            last_dt = datetime.fromisoformat(row["last_heartbeat_at"]).astimezone(UTC)
+            return (_utc_now() - last_dt).total_seconds() < settings.companion_heartbeat_timeout_seconds
+
+        online = await run_in_threadpool(_check_companion)
+        if not online:
+            raise HTTPException(status_code=503, detail={"error": "companion_unavailable", "retry_after": settings.companion_heartbeat_timeout_seconds})
+
+        arguments = body.get("arguments") or {}
+        args_str = _json.dumps(arguments, sort_keys=True)
+        arguments_hash = hashlib.sha256(args_str.encode()).hexdigest()
+
+        request_id = str(uuid.uuid4())
+        idempotency_key = str(uuid.uuid4())
+        now = _utc_now()
+        expires_at = now + timedelta(seconds=settings.approval_timeout_seconds)
+        result_expires_at_dt = now + timedelta(seconds=settings.result_ttl_seconds)
+
+        def _create_request() -> None:
+            db.execute(
+                """
+                INSERT INTO approval_requests
+                    (request_id, idempotency_key, tool_name, arguments_hash, arguments, tier, state, created_at, expires_at, result_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    request_id, idempotency_key, tool_name, arguments_hash,
+                    args_str, tier, _isoformat(now), _isoformat(expires_at),
+                    _isoformat(result_expires_at_dt),
+                ),
             )
-        except DirectCallError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail={"error": "memory_hub_call_failed", "detail": str(exc)},
-            ) from exc
+            db.commit()
+
+        await run_in_threadpool(_create_request)
+
+        # Long-poll until companion executes the tool or request expires
+        timeout_dt = expires_at
+        while True:
+            await asyncio.sleep(0.5)
+            current_now = _utc_now()
+
+            def _check_status() -> Any:
+                return db.execute(
+                    "SELECT state, result, error FROM approval_requests WHERE request_id = ?",
+                    (request_id,),
+                ).fetchone()
+
+            row = await run_in_threadpool(_check_status)
+            if row is None:
+                raise HTTPException(status_code=500, detail="request_deleted")
+
+            state = row["state"]
+            if state == "executed":
+                result_data = _json.loads(row["result"]) if row["result"] else None
+                return {"result": result_data}
+            if state == "denied":
+                raise HTTPException(status_code=403, detail={"error": "approval_denied"})
+            if state == "failed":
+                error_data = _json.loads(row["error"]) if row["error"] else "unknown_error"
+                raise HTTPException(status_code=500, detail={"error": error_data})
+            if state == "expired":
+                raise HTTPException(status_code=408, detail={"error": "approval_timeout"})
+
+            if current_now >= timeout_dt:
+                def _mark_expired() -> None:
+                    db.execute(
+                        "UPDATE approval_requests SET state = 'expired' WHERE request_id = ? AND state IN ('pending', 'approved')",
+                        (request_id,),
+                    )
+                    db.commit()
+                await run_in_threadpool(_mark_expired)
+                raise HTTPException(status_code=408, detail={"error": "approval_timeout"})
 
     @app.post("/api/v1/companion/pair/start")
     def start_pairing(request: Request, body: dict[str, str]) -> dict[str, object]:
