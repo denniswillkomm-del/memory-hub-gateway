@@ -5,13 +5,13 @@ Auth:      OAuth 2.0 Authorization Code + PKCE  (required by Claude.ai)
            OR static Bearer token via GATEWAY_MCP_TOKEN env var
 
 Flow:
-  1. Claude.ai fetches /.well-known/oauth-authorization-server
-  2. Claude.ai redirects user to /oauth/authorize
-  3. User clicks Approve in browser
-  4. Claude.ai exchanges code at POST /oauth/token  → gets access_token (JWT)
-  5. Claude.ai connects  GET /mcp/sse   with  Authorization: Bearer <token>
+  1. Claude.ai hits GET /mcp/sse  → 401 with WWW-Authenticate pointing to OAuth server
+  2. Claude.ai fetches /.well-known/oauth-authorization-server
+  3. Claude.ai opens /oauth/authorize in browser → user clicks Approve
+  4. Claude.ai exchanges code at POST /oauth/token → gets JWT access_token
+  5. Claude.ai connects GET /mcp/sse  with  Authorization: Bearer <token>
   6. Claude.ai POSTs JSON-RPC to  POST /mcp/messages?sessionId=<id>
-  7. Gateway routes tool calls through _queue_tool_and_poll → companion → memory-hub
+  7. Gateway routes tool calls → _queue_tool_and_poll → companion → memory-hub
 """
 from __future__ import annotations
 
@@ -23,10 +23,11 @@ import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncIterator
+from urllib.parse import urlencode
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from gateway.state_machine import _queue_tool_and_poll
@@ -181,8 +182,24 @@ def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
+def _public_base_url(request: Request) -> str:
+    """Return the public-facing base URL, respecting Railway's TLS proxy.
+
+    Railway terminates TLS at the edge, so uvicorn sees http:// internally.
+    We check X-Forwarded-Proto to reconstruct the correct https:// URL.
+    """
+    proto = request.headers.get("X-Forwarded-Proto", "")
+    base = str(request.base_url).rstrip("/")
+    if proto == "https" and base.startswith("http://"):
+        base = "https://" + base[7:]
+    return base
+
+
 def _verify_bearer(request: Request) -> None:
-    """Verify Bearer token — static token OR JWT issued by our OAuth flow."""
+    """Verify Bearer token — static token OR JWT issued by our OAuth flow.
+
+    Raises HTTPException(401) on failure; caller should add WWW-Authenticate.
+    """
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="bearer_token_required")
@@ -212,11 +229,31 @@ def _issue_access_token(settings: Any) -> tuple[str, datetime]:
     return token, expires_at
 
 
-# ── OAuth 2.0 discovery + endpoints ──────────────────────────────────────────
+def _www_authenticate(base: str) -> str:
+    """Return a WWW-Authenticate header value pointing to our OAuth server."""
+    return (
+        f'Bearer realm="{base}",'
+        f' resource_metadata="{base}/.well-known/oauth-protected-resource"'
+    )
+
+
+# ── OAuth 2.0 discovery ───────────────────────────────────────────────────────
+
+@router.get("/.well-known/oauth-protected-resource")
+def oauth_protected_resource(request: Request) -> dict[str, Any]:
+    """RFC 9728 resource metadata — points Claude.ai to the auth server."""
+    base = _public_base_url(request)
+    return {
+        "resource": base,
+        "authorization_servers": [base],
+        "bearer_methods_supported": ["header"],
+    }
+
 
 @router.get("/.well-known/oauth-authorization-server")
 def oauth_metadata(request: Request) -> dict[str, Any]:
-    base = str(request.base_url).rstrip("/")
+    """RFC 8414 authorization server metadata."""
+    base = _public_base_url(request)
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
@@ -225,6 +262,7 @@ def oauth_metadata(request: Request) -> dict[str, Any]:
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
     }
 
 
@@ -242,15 +280,18 @@ def oauth_authorize(
     if response_type != "code":
         return HTMLResponse("<h1>unsupported_response_type</h1>", status_code=400)
 
-    # Render approval page; form POSTs back to /oauth/authorize/action
-    params = (
-        f"client_id={client_id}&redirect_uri={redirect_uri}"
-        f"&state={state}&code_challenge={code_challenge}&scope={scope}"
-    )
-    return HTMLResponse(_render_oauth_page(client_id, redirect_uri, state, params))
+    # Build the form action URL with properly encoded parameters
+    action_params = urlencode({
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_challenge": code_challenge,
+        "scope": scope,
+    })
+    return HTMLResponse(_render_oauth_page(client_id, redirect_uri, action_params))
 
 
-def _render_oauth_page(client_id: str, redirect_uri: str, state: str, params: str) -> str:
+def _render_oauth_page(client_id: str, redirect_uri: str, action_params: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -261,7 +302,7 @@ def _render_oauth_page(client_id: str, redirect_uri: str, state: str, params: st
       body {{ font-family: system-ui, sans-serif; background: #f4f4f5; color: #18181b; margin: 0; }}
       main {{ max-width: 36rem; margin: 3rem auto; padding: 0 1rem; }}
       .card {{ background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 8px 30px rgba(0,0,0,0.08); }}
-      code {{ background: #f4f4f5; padding: 0.1rem 0.35rem; border-radius: 6px; font-size: 0.85em; }}
+      code {{ background: #f4f4f5; padding: 0.1rem 0.35rem; border-radius: 6px; font-size: 0.85em; word-break: break-all; }}
       .actions {{ display: flex; gap: 0.75rem; margin-top: 1.5rem; }}
       button {{ flex: 1; border: 0; border-radius: 8px; padding: 0.85rem 1rem; font-weight: 600; cursor: pointer; font-size: 1rem; }}
       .approve {{ background: #16a34a; color: white; }}
@@ -273,10 +314,10 @@ def _render_oauth_page(client_id: str, redirect_uri: str, state: str, params: st
     <main>
       <div class="card">
         <h1>Authorize Memory Hub access</h1>
-        <p>An external app wants to connect to your Memory Hub.</p>
-        <p class="muted">Client: <code>{client_id or "unknown"}</code></p>
-        <p class="muted">Redirect: <code>{redirect_uri}</code></p>
-        <form method="post" action="/oauth/authorize/action?{params}">
+        <p>An external app wants to read and write your Memory Hub.</p>
+        <p class="muted">App: <code>{client_id or "unknown"}</code></p>
+        <p class="muted">Callback: <code>{redirect_uri}</code></p>
+        <form method="post" action="/oauth/authorize/action?{action_params}">
           <div class="actions">
             <button class="approve" type="submit" name="action" value="approve">Approve</button>
             <button class="deny"   type="submit" name="action" value="deny">Deny</button>
@@ -297,21 +338,19 @@ async def oauth_authorize_action(
     code_challenge: str = "",
     scope: str = "",
 ) -> HTMLResponse:
-    from fastapi import Form
     form = await request.form()
     action = form.get("action", "deny")
 
     if action != "approve":
-        # Redirect with error
+        params = urlencode({"error": "access_denied", "state": state})
         sep = "&" if "?" in redirect_uri else "?"
         return HTMLResponse(
-            f'<meta http-equiv="refresh" content="0;url={redirect_uri}{sep}error=access_denied&state={state}">',
+            f'<meta http-equiv="refresh" content="0;url={redirect_uri}{sep}{params}">',
         )
 
-    # Issue authorization code
     code = str(uuid.uuid4()).replace("-", "")
     now = _utc_now()
-    expires_at = now + timedelta(seconds=300)  # codes expire in 5 min
+    expires_at = now + timedelta(seconds=300)
 
     db = request.app.state.db
 
@@ -321,23 +360,30 @@ async def oauth_authorize_action(
             INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, scope, created_at, expires_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (code, client_id, redirect_uri, code_challenge or None, scope, _isoformat(now), _isoformat(expires_at)),
+            (code, client_id, redirect_uri, code_challenge or None, scope,
+             _isoformat(now), _isoformat(expires_at)),
         )
         db.commit()
 
     await run_in_threadpool(_store)
 
+    params = urlencode({"code": code, "state": state})
     sep = "&" if "?" in redirect_uri else "?"
     return HTMLResponse(
-        f'<meta http-equiv="refresh" content="0;url={redirect_uri}{sep}code={code}&state={state}">',
+        f'<meta http-equiv="refresh" content="0;url={redirect_uri}{sep}{params}">',
     )
 
 
 @router.post("/oauth/token")
 async def oauth_token(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-    except Exception:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body: dict = await request.json()
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "invalid_request"})
+    else:
+        # Standard OAuth uses application/x-www-form-urlencoded
         form = await request.form()
         body = dict(form)
 
@@ -371,7 +417,6 @@ async def oauth_token(request: Request) -> JSONResponse:
     if row["redirect_uri"] != redirect_uri:
         return JSONResponse(status_code=400, content={"error": "invalid_grant", "detail": "redirect_uri_mismatch"})
 
-    # Verify PKCE if challenge was stored
     if row["code_challenge"]:
         if not code_verifier:
             return JSONResponse(status_code=400, content={"error": "invalid_grant", "detail": "code_verifier_required"})
@@ -381,33 +426,44 @@ async def oauth_token(request: Request) -> JSONResponse:
         if digest != row["code_challenge"]:
             return JSONResponse(status_code=400, content={"error": "invalid_grant", "detail": "pkce_mismatch"})
 
-    # Mark code as used
     def _use_code() -> None:
         db.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
         db.commit()
 
     await run_in_threadpool(_use_code)
 
-    access_token, expires_at = _issue_access_token(settings)
-    return JSONResponse(content={
-        "access_token": access_token,
-        "token_type": "bearer",
-        "expires_in": settings.access_token_ttl_seconds,
-    })
+    access_token, _ = _issue_access_token(settings)
+    return JSONResponse(
+        content={
+            "access_token": access_token,
+            "token_type": "bearer",
+            "expires_in": settings.access_token_ttl_seconds,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ── MCP SSE transport ─────────────────────────────────────────────────────────
 
 @router.get("/mcp/sse")
-async def mcp_sse(request: Request) -> StreamingResponse:
-    _verify_bearer(request)
+async def mcp_sse(request: Request) -> Response:
+    base = _public_base_url(request)
+    try:
+        _verify_bearer(request)
+    except HTTPException as exc:
+        # Return 401 with WWW-Authenticate so Claude.ai can discover the OAuth server
+        return Response(
+            status_code=401,
+            content=json.dumps({"error": exc.detail}),
+            media_type="application/json",
+            headers={"WWW-Authenticate": _www_authenticate(base)},
+        )
 
     session_id = str(uuid.uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     _sessions[session_id] = queue
 
-    base_url = str(request.base_url).rstrip("/")
-    messages_url = f"{base_url}/mcp/messages?sessionId={session_id}"
+    messages_url = f"{base}/mcp/messages?sessionId={session_id}"
 
     async def event_stream() -> AsyncIterator[str]:
         try:
@@ -470,7 +526,7 @@ async def _handle_jsonrpc(body: dict, queue: asyncio.Queue, request: Request) ->
             })
 
         elif method in ("notifications/initialized", "notifications/cancelled"):
-            pass  # fire-and-forget, no response
+            pass  # fire-and-forget, no response needed
 
         elif method == "ping":
             await queue.put({"jsonrpc": "2.0", "id": req_id, "result": {}})
@@ -486,17 +542,19 @@ async def _handle_jsonrpc(body: dict, queue: asyncio.Queue, request: Request) ->
             await _handle_tool_call(req_id, params, queue, request)
 
         else:
+            if req_id is not None:
+                await queue.put({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": f"Method not found: {method}"},
+                })
+    except Exception as exc:
+        if req_id is not None:
             await queue.put({
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
+                "error": {"code": -32000, "message": str(exc)},
             })
-    except Exception as exc:
-        await queue.put({
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32000, "message": str(exc)},
-        })
 
 
 async def _handle_tool_call(
@@ -517,7 +575,6 @@ async def _handle_tool_call(
         })
         return
 
-    # Inject agent_name for create_memory so memory-hub doesn't reject it
     if tool_name == "create_memory" and "agent_name" not in arguments:
         arguments = {**arguments, "agent_name": "claude_web"}
 
