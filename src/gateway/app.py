@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from gateway.allowlist import AllowlistConfig, allowlist_middleware_dispatch
 from gateway.config import Settings, get_settings
 from gateway.db import get_connection, run_migrations
+from gateway.mcp_sse import router as mcp_sse_router
 from gateway.state_machine import router as state_machine_router
 
 import os as _os
@@ -160,6 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Memory Hub Gateway", version="0.1.0", lifespan=lifespan)
     app.middleware("http")(allowlist_middleware_dispatch)
     app.include_router(state_machine_router)
+    app.include_router(mcp_sse_router)
 
     @app.get("/health")
     def health() -> dict[str, bool]:
