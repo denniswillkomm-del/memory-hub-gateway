@@ -443,7 +443,173 @@ async def oauth_token(request: Request) -> JSONResponse:
     )
 
 
-# ── MCP SSE transport ─────────────────────────────────────────────────────────
+# ── MCP Streamable HTTP transport (2025-03-26) — used by Claude.ai ───────────
+#
+# Single endpoint POST /mcp handles all JSON-RPC.
+# GET  /mcp → 401 (triggers OAuth discovery) or SSE for server notifications.
+# Session tracked via Mcp-Session-Id header (in-memory queue per session).
+
+@router.get("/mcp")
+async def mcp_get(request: Request) -> Response:
+    """GET /mcp — unauthenticated callers get 401 for OAuth discovery.
+    Authenticated callers receive an SSE stream for server-initiated messages.
+    """
+    base = _public_base_url(request)
+    try:
+        _verify_bearer(request)
+    except HTTPException:
+        return Response(
+            status_code=401,
+            content=json.dumps({"error": "bearer_token_required"}),
+            media_type="application/json",
+            headers={"WWW-Authenticate": _www_authenticate(base)},
+        )
+
+    # Authenticated: open a persistent SSE stream for server push
+    session_id = request.headers.get("Mcp-Session-Id", str(uuid.uuid4()))
+    queue: asyncio.Queue = asyncio.Queue()
+    _sessions[session_id] = queue
+
+    async def event_stream() -> AsyncIterator[str]:
+        try:
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    if msg is None:
+                        break
+                    yield f"data: {json.dumps(msg)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _sessions.pop(session_id, None)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+            "Mcp-Session-Id": session_id,
+        },
+    )
+
+
+@router.post("/mcp")
+async def mcp_post(request: Request) -> Response:
+    """POST /mcp — Streamable HTTP MCP transport.
+
+    Returns 401 when unauthenticated (triggers OAuth discovery in the client).
+    Returns JSON for simple methods; keeps connection open for tool calls that
+    wait on the companion (long-poll inside _queue_tool_and_poll).
+    """
+    base = _public_base_url(request)
+    try:
+        _verify_bearer(request)
+    except HTTPException:
+        return Response(
+            status_code=401,
+            content=json.dumps({"error": "bearer_token_required"}),
+            media_type="application/json",
+            headers={"WWW-Authenticate": _www_authenticate(base)},
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return Response(status_code=400, content=json.dumps({"error": "invalid_json"}), media_type="application/json")
+
+    session_id = request.headers.get("Mcp-Session-Id", str(uuid.uuid4()))
+    method = body.get("method", "")
+    req_id = body.get("id")
+    params = body.get("params") or {}
+
+    # Notifications don't need a response
+    if method.startswith("notifications/"):
+        return Response(status_code=202, headers={"Mcp-Session-Id": session_id})
+
+    rpc_response = await _dispatch_jsonrpc(method, req_id, params, request)
+
+    return Response(
+        content=json.dumps(rpc_response),
+        media_type="application/json",
+        headers={"Mcp-Session-Id": session_id},
+    )
+
+
+async def _dispatch_jsonrpc(
+    method: str,
+    req_id: Any,
+    params: dict,
+    request: Request,
+) -> dict:
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "memory-hub-gateway", "version": "2.0.0"},
+            },
+        }
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": _TOOLS}}
+
+    if method == "tools/call":
+        return await _dispatch_tool_call(req_id, params, request)
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+async def _dispatch_tool_call(req_id: Any, params: dict, request: Request) -> dict:
+    tool_name = params.get("name", "")
+    arguments = params.get("arguments") or {}
+
+    tier = _TOOL_TIERS.get(tool_name)
+    if tier is None:
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
+        }
+
+    if tool_name == "create_memory" and "agent_name" not in arguments:
+        arguments = {**arguments, "agent_name": "claude_web"}
+
+    try:
+        result = await _queue_tool_and_poll(request, tool_name, arguments, tier=tier)
+        result_text = json.dumps(result.get("result", result), ensure_ascii=False, indent=2)
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": result_text}],
+                "isError": False,
+            },
+        }
+    except HTTPException as exc:
+        detail = exc.detail
+        msg = detail.get("error", str(detail)) if isinstance(detail, dict) else str(detail)
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": f"Error: {msg}"}],
+                "isError": True,
+            },
+        }
+
+
+# ── Legacy SSE transport (kept for non-Claude.ai MCP clients) ─────────────────
 
 @router.get("/mcp/sse")
 async def mcp_sse(request: Request) -> Response:
@@ -451,7 +617,6 @@ async def mcp_sse(request: Request) -> Response:
     try:
         _verify_bearer(request)
     except HTTPException as exc:
-        # Return 401 with WWW-Authenticate so Claude.ai can discover the OAuth server
         return Response(
             status_code=401,
             content=json.dumps({"error": exc.detail}),
@@ -467,13 +632,11 @@ async def mcp_sse(request: Request) -> Response:
 
     async def event_stream() -> AsyncIterator[str]:
         try:
-            # MCP SSE handshake: send the messages endpoint URL
             yield f"event: endpoint\ndata: {messages_url}\n\n"
-
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    if msg is None:  # sentinel → close stream
+                    if msg is None:
                         break
                     yield f"data: {json.dumps(msg)}\n\n"
                 except asyncio.TimeoutError:
@@ -484,11 +647,7 @@ async def mcp_sse(request: Request) -> Response:
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
 
 
@@ -503,7 +662,6 @@ async def mcp_messages(request: Request, sessionId: str = "") -> JSONResponse:
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
 
-    # Dispatch async; respond immediately with 202
     asyncio.create_task(_handle_jsonrpc(body, queue, request))
     return JSONResponse(status_code=202, content={})
 
