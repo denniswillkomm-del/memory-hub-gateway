@@ -10,8 +10,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator
 
+import logging
+
 import jwt
 from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -20,6 +23,8 @@ from gateway.config import Settings, get_settings
 from gateway.db import get_connection, run_migrations
 from gateway.mcp_sse import router as mcp_sse_router
 from gateway.state_machine import router as state_machine_router
+
+_req_log = logging.getLogger("gateway.requests")
 
 import os as _os
 MIGRATIONS_DIR = Path(_os.getenv("GATEWAY_MIGRATIONS_DIR", str(Path(__file__).resolve().parents[2] / "migrations")))
@@ -159,6 +164,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conn.close()
 
     app = FastAPI(title="Memory Hub Gateway", version="0.1.0", lifespan=lifespan)
+
+    # CORS — needed for browser-side OAuth flows (Claude.ai, ChatGPT web)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Request logger — logs every inbound path/method so we can debug
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next: Any) -> Any:
+        _req_log.info("%s %s  ua=%s", request.method, request.url.path,
+                      request.headers.get("user-agent", "-")[:80])
+        response = await call_next(request)
+        _req_log.info("→ %s", response.status_code)
+        return response
+
     app.middleware("http")(allowlist_middleware_dispatch)
     app.include_router(state_machine_router)
     app.include_router(mcp_sse_router)

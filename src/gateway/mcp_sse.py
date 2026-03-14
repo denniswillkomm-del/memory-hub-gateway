@@ -230,11 +230,11 @@ def _issue_access_token(settings: Any) -> tuple[str, datetime]:
 
 
 def _www_authenticate(base: str) -> str:
-    """Return a WWW-Authenticate header value pointing to our OAuth server."""
-    return (
-        f'Bearer realm="{base}",'
-        f' resource_metadata="{base}/.well-known/oauth-protected-resource"'
-    )
+    """Return a WWW-Authenticate header value pointing to our OAuth server.
+
+    MCP auth spec: only resource_metadata is required — no realm prefix.
+    """
+    return f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"'
 
 
 # ── OAuth 2.0 discovery ───────────────────────────────────────────────────────
@@ -251,6 +251,7 @@ def oauth_protected_resource(request: Request) -> dict[str, Any]:
 
 
 @router.get("/.well-known/oauth-authorization-server")
+@router.get("/.well-known/openid-configuration")  # some clients prefer this path
 def oauth_metadata(request: Request) -> dict[str, Any]:
     """RFC 8414 authorization server metadata."""
     base = _public_base_url(request)
@@ -258,12 +259,42 @@ def oauth_metadata(request: Request) -> dict[str, Any]:
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
         "token_endpoint": f"{base}/oauth/token",
+        "registration_endpoint": f"{base}/oauth/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": ["mcp"],
     }
+
+
+@router.post("/oauth/register")
+async def oauth_register(request: Request) -> JSONResponse:
+    """RFC 7591 Dynamic Client Registration.
+
+    Claude.ai and other MCP clients call this before starting OAuth.
+    We accept any registration and return a client_id immediately.
+    """
+    try:
+        body: dict = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid_request"})
+
+    client_id = str(uuid.uuid4())
+    redirect_uris = body.get("redirect_uris", [])
+
+    return JSONResponse(
+        status_code=201,
+        content={
+            "client_id": client_id,
+            "client_id_issued_at": int(_utc_now().timestamp()),
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "client_name": body.get("client_name", "MCP Client"),
+        },
+    )
 
 
 @router.get("/oauth/authorize", response_class=HTMLResponse)
